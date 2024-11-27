@@ -1,5 +1,5 @@
-;; TicketChain - Decentralized Event Ticketing System
-;; Description: Smart contract for minting and managing NFT event tickets with transfer restrictions and refund policies
+;; TicketChain - Decentralized Event Ticketing System with Refund Insurance
+;; Description: Smart contract for minting and managing NFT event tickets with transfer restrictions and refund insurance
 
 ;; Constants
 (define-constant contract-owner tx-sender)
@@ -9,10 +9,14 @@
 (define-constant ERR-TRANSFER-RESTRICTED (err u103))
 (define-constant ERR-EVENT-ACTIVE (err u104))
 (define-constant ERR-INVALID-REFUND (err u105))
+(define-constant ERR-INSURANCE-CLAIMED (err u106))
+(define-constant INSURANCE-PREMIUM-PERCENTAGE u5) ;; 5% of ticket price
+(define-constant INSURANCE-POOL-ADDRESS 'SP000000000000000000002Q6VF78) ;; Example pool address
 
 ;; Data Variables
 (define-data-var next-event-id uint u1)
 (define-data-var next-ticket-id uint u1)
+(define-data-var insurance-pool uint u0)
 
 ;; Data Maps
 (define-map Events
@@ -37,6 +41,8 @@
         is-used: bool,
         transferred: bool,
         purchase-price: uint,
+        has-insurance: bool,
+        insurance-claimed: bool,
         metadata-uri: (string-ascii 256)
     }
 )
@@ -50,6 +56,21 @@
 (define-private (is-event-organizer (event-id uint) (caller principal))
     (let ((event (unwrap! (map-get? Events event-id) false)))
         (is-eq (get organizer event) caller)
+    )
+)
+
+(define-private (calculate-insurance-premium (ticket-price uint))
+    (/ (* ticket-price INSURANCE-PREMIUM-PERCENTAGE) u100)
+)
+
+(define-private (handle-insurance-purchase (insurance-premium uint) (organizer principal))
+    (if (> insurance-premium u0)
+        (begin
+            (try! (stx-transfer? insurance-premium organizer INSURANCE-POOL-ADDRESS))
+            (var-set insurance-pool (+ (var-get insurance-pool) insurance-premium))
+            (ok true)
+        )
+        (ok true)
     )
 )
 
@@ -80,17 +101,24 @@
     )
 )
 
-;; Purchase a ticket
-(define-public (purchase-ticket (event-id uint))
+;; Purchase a ticket with optional insurance
+(define-public (purchase-ticket (event-id uint) (with-insurance bool))
     (let (
         (event (unwrap! (map-get? Events event-id) ERR-EVENT-NOT-FOUND))
         (ticket-id (var-get next-ticket-id))
+        (insurance-premium (if with-insurance 
+                             (calculate-insurance-premium (get price event))
+                             u0))
+        (total-cost (+ (get price event) insurance-premium))
     )
         (asserts! (< (get tickets-sold event) (get total-tickets event)) ERR-SOLD-OUT)
         (asserts! (not (get is-canceled event)) ERR-EVENT-ACTIVE)
         
         ;; Process payment
-        (try! (stx-transfer? (get price event) tx-sender (get organizer event)))
+        (try! (stx-transfer? total-cost tx-sender (get organizer event)))
+        
+        ;; Handle insurance purchase
+        (try! (handle-insurance-purchase insurance-premium (get organizer event)))
         
         ;; Mint ticket
         (map-set Tickets
@@ -101,6 +129,8 @@
                 is-used: false,
                 transferred: false,
                 purchase-price: (get price event),
+                has-insurance: with-insurance,
+                insurance-claimed: false,
                 metadata-uri: (get metadata-uri event)
             }
         )
@@ -177,6 +207,32 @@
     )
 )
 
+;; Claim insurance refund (can be used even if event is not canceled)
+(define-public (claim-insurance-refund (ticket-id uint))
+    (let (
+        (ticket (unwrap! (map-get? Tickets ticket-id) ERR-EVENT-NOT-FOUND))
+    )
+        (asserts! (is-eq (get owner ticket) tx-sender) ERR-NOT-AUTHORIZED)
+        (asserts! (get has-insurance ticket) ERR-INVALID-REFUND)
+        (asserts! (not (get insurance-claimed ticket)) ERR-INSURANCE-CLAIMED)
+        
+        ;; Process insurance refund
+        (try! (stx-transfer? (get purchase-price ticket) 
+                           INSURANCE-POOL-ADDRESS 
+                           tx-sender))
+        
+        ;; Mark insurance as claimed
+        (map-set Tickets
+            ticket-id
+            (merge ticket { 
+                insurance-claimed: true,
+                is-used: true 
+            })
+        )
+        (ok true)
+    )
+)
+
 ;; Validate ticket
 (define-public (validate-ticket (ticket-id uint))
     (let ((ticket (unwrap! (map-get? Tickets ticket-id) ERR-EVENT-NOT-FOUND)))
@@ -203,4 +259,12 @@
 
 (define-read-only (get-event-tickets (event-id uint))
     (map-get? EventTickets event-id)
+)
+
+(define-read-only (get-insurance-premium (ticket-price uint))
+    (calculate-insurance-premium ticket-price)
+)
+
+(define-read-only (get-insurance-pool-balance)
+    (var-get insurance-pool)
 )
