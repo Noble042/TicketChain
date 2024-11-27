@@ -10,8 +10,11 @@
 (define-constant ERR-EVENT-ACTIVE (err u104))
 (define-constant ERR-INVALID-REFUND (err u105))
 (define-constant ERR-INSURANCE-CLAIMED (err u106))
+(define-constant ERR-INVALID-PARAMS (err u107))
 (define-constant INSURANCE-PREMIUM-PERCENTAGE u5) ;; 5% of ticket price
 (define-constant INSURANCE-POOL-ADDRESS 'SP000000000000000000002Q6VF78) ;; Example pool address
+(define-constant MIN-PRICE u1000) ;; Minimum ticket price
+(define-constant MAX-TICKETS u10000) ;; Maximum tickets per event
 
 ;; Data Variables
 (define-data-var next-event-id uint u1)
@@ -74,6 +77,21 @@
     )
 )
 
+(define-private (validate-event-params (name (string-ascii 100)) 
+                                     (total-tickets uint)
+                                     (price uint)
+                                     (date uint)
+                                     (metadata-uri (string-ascii 256)))
+    (and
+        (> (len name) u0)
+        (<= total-tickets MAX-TICKETS)
+        (> total-tickets u0)
+        (>= price MIN-PRICE)
+        (> date block-height)
+        (> (len metadata-uri) u0)
+    )
+)
+
 ;; Public Functions
 
 ;; Create a new event
@@ -82,7 +100,12 @@
                            (price uint)
                            (date uint)
                            (metadata-uri (string-ascii 256)))
-    (let ((event-id (var-get next-event-id)))
+    (let (
+        (event-id (var-get next-event-id))
+        (params-valid (validate-event-params name total-tickets price date metadata-uri))
+    )
+        (asserts! params-valid ERR-INVALID-PARAMS)
+        
         (map-set Events
             event-id
             {
@@ -113,6 +136,7 @@
     )
         (asserts! (< (get tickets-sold event) (get total-tickets event)) ERR-SOLD-OUT)
         (asserts! (not (get is-canceled event)) ERR-EVENT-ACTIVE)
+        (asserts! (< block-height (get date event)) ERR-INVALID-PARAMS)
         
         ;; Process payment
         (try! (stx-transfer? total-cost tx-sender (get organizer event)))
